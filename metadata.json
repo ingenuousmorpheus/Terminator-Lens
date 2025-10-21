@@ -1,0 +1,8 @@
+{
+  "name": "Terminator Vision Analyzer",
+  "description": "An application that uses a webcam to detect people and analyzes them using AI, mimicking a futuristic tactical display. It identifies a person, draws a bounding box, and provides an estimated age, weight, height, and race.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "prompt": ""
+}
