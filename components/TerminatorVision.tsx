@@ -8,8 +8,8 @@ declare var cocoSsd: any;
 declare var tf: any;
 
 const StatusText: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 z-30">
-    <p className="text-2xl text-red-500 font-bold tracking-widest animate-pulse">{children}</p>
+  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black bg-opacity-70 z-30 text-center">
+    {children}
   </div>
 );
 
@@ -37,9 +37,9 @@ const AnalysisMatrix: React.FC<{ data: AnalysisData | null; isLoading: boolean }
 
 const TargetingReticle: React.FC<{ box: [number, number, number, number] }> = ({ box }) => {
     const [x, y, width, height] = box;
-    // Target the upper center of the box (approximating the head)
+    // Target the upper center of the box, moved higher to better approximate the face
     const cx = x + width / 2;
-    const cy = y + height / 4;
+    const cy = y + height / 8; // Aim higher than the previous quarter-down position
 
     const style = {
         transform: `translate(${cx}px, ${cy}px)`,
@@ -122,9 +122,11 @@ const TerminatorVision: React.FC = () => {
     const modelRef = useRef<any>(null);
     const detectionFrameRef = useRef<number>(0);
     const containerRef = useRef<HTMLDivElement>(null);
-    const analysisClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const analysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const analysisStateRef = useRef<'IDLE' | 'ANALYZING' | 'DISPLAYING'>('IDLE');
 
     const [status, setStatus] = useState<string>('INITIALIZING...');
+    const [permissionError, setPermissionError] = useState<boolean>(false);
     const [person, setPerson] = useState<DetectedObject | null>(null);
     const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
     const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
@@ -145,22 +147,26 @@ const TerminatorVision: React.FC = () => {
     };
 
     const handleAnalysis = useCallback(async (detectedPerson: DetectedObject) => {
-        if (analysisClearTimerRef.current) {
-            clearTimeout(analysisClearTimerRef.current);
-        }
-
+        analysisStateRef.current = 'ANALYZING';
         setIsAnalyzing(true);
         const base64Image = cropPerson(detectedPerson.bbox);
         
         if (base64Image) {
             const data = await analyzePerson(base64Image);
             setAnalysisData(data);
-            analysisClearTimerRef.current = setTimeout(() => {
+            setIsAnalyzing(false);
+            analysisStateRef.current = 'DISPLAYING';
+
+            analysisTimerRef.current = setTimeout(() => {
                 setAnalysisData(null);
-            }, 20000); // Display for 20 seconds
+                analysisStateRef.current = 'IDLE';
+                analysisTimerRef.current = null;
+            }, 10000); // Display for 10 seconds
+        } else {
+             // If cropping fails, reset state to allow another try.
+            setIsAnalyzing(false);
+            analysisStateRef.current = 'IDLE';
         }
-        
-        setIsAnalyzing(false);
     }, []);
 
     const detectFrame = useCallback(async () => {
@@ -175,54 +181,57 @@ const TerminatorVision: React.FC = () => {
 
         if (detectedPerson) {
             setPerson(detectedPerson);
-            // Only trigger a new analysis if one isn't already in progress or being displayed.
-            if (!isAnalyzing && !analysisData) {
+            if (analysisStateRef.current === 'IDLE') {
                 handleAnalysis(detectedPerson);
             }
         } else {
             setPerson(null);
-            // Analysis data is cleared by its own timer, not by losing the target.
         }
 
         detectionFrameRef.current = requestAnimationFrame(detectFrame);
-    }, [isAnalyzing, analysisData, handleAnalysis]);
+    }, [handleAnalysis]);
 
+
+    const setupCameraAndModel = useCallback(async () => {
+        // Reset state for retry
+        setPermissionError(false);
+        setStatus('INITIALIZING...');
+        
+        try {
+             setStatus('LOADING AI MODEL...');
+            await tf.setBackend('webgl');
+            modelRef.current = await cocoSsd.load();
+
+            setStatus('ACCESSING WEBCAM...');
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480, facingMode: 'user' },
+            });
+            
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+                videoRef.current.onloadedmetadata = () => {
+                    videoRef.current?.play();
+                    setStatus('');
+                    detectionFrameRef.current = requestAnimationFrame(detectFrame);
+                };
+            }
+        } catch (err) {
+            console.error(err);
+            if (err instanceof Error) {
+                 if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+                    setStatus("WEBCAM PERMISSION DENIED");
+                    setPermissionError(true);
+                } else {
+                    setStatus(`ERROR: ${err.message}`);
+                }
+            } else {
+                setStatus("AN UNKNOWN ERROR OCCURRED");
+            }
+        }
+    }, [detectFrame]);
 
     useEffect(() => {
-        const setup = async () => {
-            try {
-                 setStatus('LOADING AI MODEL...');
-                await tf.setBackend('webgl');
-                modelRef.current = await cocoSsd.load();
-
-                setStatus('ACCESSING WEBCAM...');
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: 640, height: 480, facingMode: 'user' },
-                });
-                
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream;
-                    videoRef.current.onloadedmetadata = () => {
-                        videoRef.current?.play();
-                        setStatus('');
-                        detectionFrameRef.current = requestAnimationFrame(detectFrame);
-                    };
-                }
-            } catch (err) {
-                console.error(err);
-                if (err instanceof Error) {
-                     if (err.name === "NotAllowedError") {
-                        setStatus("WEBCAM PERMISSION DENIED");
-                    } else {
-                        setStatus(`ERROR: ${err.message}`);
-                    }
-                } else {
-                    setStatus("AN UNKNOWN ERROR OCCURRED");
-                }
-            }
-        };
-
-        setup();
+        setupCameraAndModel();
 
         return () => {
             cancelAnimationFrame(detectionFrameRef.current);
@@ -230,12 +239,11 @@ const TerminatorVision: React.FC = () => {
                 const stream = videoRef.current.srcObject as MediaStream;
                 stream.getTracks().forEach(track => track.stop());
             }
-            if (analysisClearTimerRef.current) {
-                clearTimeout(analysisClearTimerRef.current);
+            if (analysisTimerRef.current) {
+                clearTimeout(analysisTimerRef.current);
             }
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [setupCameraAndModel]);
 
 
     return (
@@ -257,8 +265,28 @@ const TerminatorVision: React.FC = () => {
                     isAnalyzing={isAnalyzing}
                 />
                 
-                {status && <StatusText>{status}</StatusText>}
-                {!status && !person && <StatusText>ACQUIRING TARGET...</StatusText>}
+                {status && (
+                    <StatusText>
+                        <p className="text-2xl text-red-500 font-bold tracking-widest animate-pulse">{status}</p>
+                        {permissionError && (
+                            <div className="mt-4">
+                                <p className="text-lg font-normal mb-4 text-red-400">Please grant camera access in your browser settings and try again.</p>
+                                <button
+                                    onClick={setupCameraAndModel}
+                                    className="bg-red-700 hover:bg-red-600 text-white font-bold py-2 px-4 border border-red-500 rounded"
+                                    aria-label="Retry camera initialization"
+                                >
+                                    Retry Initialization
+                                </button>
+                            </div>
+                        )}
+                    </StatusText>
+                )}
+                {!status && !person && (
+                    <StatusText>
+                        <p className="text-2xl text-red-500 font-bold tracking-widest animate-pulse">ACQUIRING TARGET...</p>
+                    </StatusText>
+                )}
             </div>
         </div>
     );
